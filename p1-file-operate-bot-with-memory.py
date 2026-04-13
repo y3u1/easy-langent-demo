@@ -1,5 +1,6 @@
 from pathlib import Path
 import random
+import magic
 from string import hexdigits
 import os
 from myllm import chat_model as llm
@@ -34,7 +35,6 @@ def write_tool(path:str | None,file_name:str| None,content:str) -> str:
     
     print(f"写入文件夹位置:{write_path}")
     if os.access(path,os.W_OK):
-        print(f"拥有权限，开始写入:{write_path}")
         try:
             with open(write_path,"w") as file:
                 file.write(content)
@@ -44,7 +44,74 @@ def write_tool(path:str | None,file_name:str| None,content:str) -> str:
     else:
         return f"❌{write_path} 没有写入权限"
 
-tools = [write_tool]
+@tool
+def list_tool(path:str | None) -> str:
+    """列出指定文件夹下所有文件的名称及其类型
+
+    Args:
+        path (str | None): 文件夹路径
+
+    Returns:
+        str: 文件夹下文件名称或者错误消息
+    """
+    if not path:
+        path = Path.cwd()
+    else:
+        path = Path(path)
+    if os.access(path,os.R_OK):
+        try:
+            # files = "\n".join([name for name in os.listdir(path)])
+            files = [name for name in os.listdir(path)]
+            return f"✅文件夹路径{path}中的文件有：{files}"
+        except Exception as e:
+            return f"❌列文件失败: {e}"
+    else:
+        return f"❌{path} 没有读权限"
+
+@tool
+def delete_tool(path:str | None) -> str:
+    """用于删除单个文件的工具，删除前需要向用户确认，并给出完整文件删除路径
+
+    Args:
+        path (str | None): 需要删除文件的路径
+
+    Returns:
+        str: 删除的结果
+    """
+    path = Path(path)
+    if Path.is_dir(path):
+        return f"{path}是一个文件夹！请指定单个文件"
+    try:
+        os.remove(path)
+        return f"✅文件{path}删除成功"
+    except PermissionError:
+        return f"❌文件{path}删除权限不足，请检查父目录权限或文件是否被占用"
+    except FileNotFoundError:
+        return f"❌文件{path}不存在"
+    except Exception as e:
+        return False, f"❌未知错误: {e}"
+
+@tool
+def file_type_tool(path:str | None) -> str:
+    """用于判断文件类型的工具
+
+    Args:
+        path (str | None): 文件路径
+
+    Returns:
+        str: 文件类型
+    """
+    path : Path = Path(path)
+    if path.is_dir():
+        return f"✅文件夹"
+    mime = magic.Magic(mime=True)
+    try:
+        mime_type = mime.from_file(str(path))
+        return f"✅{mime_type}"
+    except Exception as e:
+        return f"❌文件{path}类型判断失败"
+    
+tools = [write_tool,list_tool,file_type_tool,delete_tool]
 
 
 history_memory = {}
@@ -91,6 +158,10 @@ while True:
     user_input = input("❓")
     result = agent_with_memory.invoke({"user_input" : user_input},config=config)
     history = get_history("1")
+    # 大模型只负责“说话”，无法自己调用工具
+    # 因此需要返回要调用的函数名称和函数参数的
+    # 使用 ToolMessage 标记为一个工具调用消息，从而langchain才知道大模型要调用工具了
+    
     if isinstance(result, AIMessage) and result.tool_calls:
         print("\n🔧【模型决定调用工具】")
         for call in result.tool_calls:
@@ -100,12 +171,16 @@ while True:
             print(f"➡️ 工具名：{tool_name}")
             print(f"➡️ 参数：{tool_args}")
 
+            # 调用大模型指定的工具
+            # Q:一次只调用一个工具？
             tool_func = next(t for t in tools if t.name == tool_name)
             observation = tool_func.invoke(tool_args)
 
             print("\n📦【工具执行结果】")
             print(observation)
 
+            # OpenAI API 规定：每一个 tool_calls 必须有且仅有一个对应的 ToolMessage，且 ID 必须匹配
+            # content转化为str
             history.add_message(
                 ToolMessage(
                     tool_call_id=call["id"],
